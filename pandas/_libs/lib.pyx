@@ -25,7 +25,6 @@ from cpython.object cimport (
     Py_EQ,
     PyObject,
     PyObject_RichCompareBool,
-    PyTypeObject,
 )
 from cpython.ref cimport Py_INCREF
 from cpython.sequence cimport PySequence_Check
@@ -37,6 +36,8 @@ from cython cimport (
     Py_ssize_t,
     floating,
 )
+
+from pandas._config import using_pyarrow_string_dtype
 
 from pandas._libs.missing import check_na_tuples_nonequal
 
@@ -65,10 +66,6 @@ from numpy cimport (
 
 cnp.import_array()
 
-cdef extern from "Python.h":
-    # Note: importing extern-style allows us to declare these as nogil
-    # functions, whereas `from cpython cimport` does not.
-    bint PyObject_TypeCheck(object obj, PyTypeObject* type) nogil
 
 cdef extern from "numpy/arrayobject.h":
     # cython's numpy.dtype specification is incorrect, which leads to
@@ -87,12 +84,6 @@ cdef extern from "numpy/arrayobject.h":
             object fields
             tuple names
 
-    PyTypeObject PySignedIntegerArrType_Type
-    PyTypeObject PyUnsignedIntegerArrType_Type
-
-cdef extern from "numpy/ndarrayobject.h":
-    bint PyArray_CheckScalar(obj) nogil
-
 cdef extern from "pandas/parser/pd_parser.h":
     int floatify(object, float64_t *result, int *maybe_int) except -1
     void PandasParser_IMPORT()
@@ -100,6 +91,7 @@ cdef extern from "pandas/parser/pd_parser.h":
 PandasParser_IMPORT
 
 from pandas._libs cimport util
+from pandas._libs.dtypes cimport uint8_int64_object_t
 from pandas._libs.util cimport (
     INT64_MAX,
     INT64_MIN,
@@ -142,7 +134,7 @@ cdef:
     object oINT64_MIN = <int64_t>INT64_MIN
     object oUINT64_MAX = <uint64_t>UINT64_MAX
 
-    float64_t NaN = <float64_t>np.NaN
+    float64_t NaN = <float64_t>np.nan
 
 # python-visible
 i8max = <int64_t>INT64_MAX
@@ -269,7 +261,7 @@ cdef int64_t get_itemsize(object val):
     -------
     is_ndarray : bool
     """
-    if PyArray_CheckScalar(val):
+    if cnp.PyArray_CheckScalar(val):
         return cnp.PyArray_DescrFromScalar(val).itemsize
     else:
         return -1
@@ -528,6 +520,22 @@ def has_infs(floating[:] arr) -> bool:
     return ret
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def has_only_ints_or_nan(floating[:] arr) -> bool:
+    cdef:
+        floating val
+        intp_t i
+
+    for i in range(len(arr)):
+        val = arr[i]
+        if (val != val) or (val == <int64_t>val):
+            continue
+        else:
+            return False
+    return True
+
+
 def maybe_indices_to_slice(ndarray[intp_t, ndim=1] indices, int max_len):
     cdef:
         Py_ssize_t i, n = len(indices)
@@ -758,6 +766,7 @@ cpdef ndarray[object] ensure_string_array(
     cdef:
         Py_ssize_t i = 0, n = len(arr)
         bint already_copied = True
+        ndarray[object] newarr
 
     if hasattr(arr, "to_numpy"):
 
@@ -773,7 +782,8 @@ cpdef ndarray[object] ensure_string_array(
 
     result = np.asarray(arr, dtype="object")
 
-    if copy and result is arr:
+    if copy and (result is arr or np.shares_memory(arr, result)):
+        # GH#54654
         result = result.copy()
     elif not copy and result is arr:
         already_copied = False
@@ -782,8 +792,30 @@ cpdef ndarray[object] ensure_string_array(
         # short-circuit, all elements are str
         return result
 
+    if arr.dtype.kind == "f":  # non-optimized path
+        for i in range(n):
+            val = arr[i]
+
+            if not already_copied:
+                result = result.copy()
+                already_copied = True
+
+            if not checknull(val):
+                # f"{val}" is not always equivalent to str(val) for floats
+                result[i] = str(val)
+            else:
+                if convert_na_value:
+                    val = na_value
+                if skipna:
+                    result[i] = val
+                else:
+                    result[i] = f"{val}"
+
+        return result
+
+    newarr = np.asarray(arr, dtype=object)
     for i in range(n):
-        val = arr[i]
+        val = newarr[i]
 
         if isinstance(val, str):
             continue
@@ -822,10 +854,16 @@ def is_all_arraylike(obj: list) -> bool:
         object val
         bint all_arrays = True
 
+    from pandas.core.dtypes.generic import (
+        ABCIndex,
+        ABCMultiIndex,
+        ABCSeries,
+    )
+
     for i in range(n):
         val = obj[i]
-        if not (isinstance(val, list) or
-                util.is_array(val) or hasattr(val, "_data")):
+        if (not (isinstance(val, (list, ABCSeries, ABCIndex)) or util.is_array(val))
+                or isinstance(val, ABCMultiIndex)):
             # TODO: EA?
             # exclude tuples, frozensets as they may be contained in an Index
             all_arrays = False
@@ -1299,6 +1337,7 @@ cdef class Seen:
         bint datetimetz_      # seen_datetimetz
         bint period_          # seen_period
         bint interval_        # seen_interval
+        bint str_             # seen_str
 
     def __cinit__(self, bint coerce_numeric=False):
         """
@@ -1325,6 +1364,7 @@ cdef class Seen:
         self.datetimetz_ = False
         self.period_ = False
         self.interval_ = False
+        self.str_ = False
         self.coerce_numeric = coerce_numeric
 
     cdef bint check_uint64_conflict(self) except -1:
@@ -1389,14 +1429,12 @@ cdef class Seen:
         self.sint_ = (
             self.sint_
             or (oINT64_MIN <= val < 0)
-            # Cython equivalent of `isinstance(val, np.signedinteger)`
-            or PyObject_TypeCheck(val, &PySignedIntegerArrType_Type)
+            or isinstance(val, cnp.signedinteger)
         )
         self.uint_ = (
             self.uint_
             or (oINT64_MAX < val <= oUINT64_MAX)
-            # Cython equivalent of `isinstance(val, np.unsignedinteger)`
-            or PyObject_TypeCheck(val, &PyUnsignedIntegerArrType_Type)
+            or isinstance(val, cnp.unsignedinteger)
         )
 
     @property
@@ -1606,7 +1644,7 @@ def infer_dtype(value: object, skipna: bool = True) -> str:
     if seen_val is False and skipna:
         return "empty"
 
-    if util.is_datetime64_object(val):
+    if cnp.is_datetime64_object(val):
         if is_datetime64_array(values, skipna=skipna):
             return "datetime64"
 
@@ -1690,7 +1728,7 @@ def infer_dtype(value: object, skipna: bool = True) -> str:
 
 
 cdef bint is_timedelta(object o):
-    return PyDelta_Check(o) or util.is_timedelta64_object(o)
+    return PyDelta_Check(o) or cnp.is_timedelta64_object(o)
 
 
 @cython.internal
@@ -1977,7 +2015,7 @@ cpdef bint is_datetime_array(ndarray values, bint skipna=True):
 @cython.internal
 cdef class Datetime64Validator(DatetimeValidator):
     cdef bint is_value_typed(self, object value) except -1:
-        return util.is_datetime64_object(value)
+        return cnp.is_datetime64_object(value)
 
 
 # Note: only python-exposed for tests
@@ -1991,7 +2029,7 @@ cpdef bint is_datetime64_array(ndarray values, bint skipna=True):
 @cython.internal
 cdef class AnyDatetimeValidator(DatetimeValidator):
     cdef bint is_value_typed(self, object value) except -1:
-        return util.is_datetime64_object(value) or (
+        return cnp.is_datetime64_object(value) or (
             PyDateTime_Check(value) and value.tzinfo is None
         )
 
@@ -2475,6 +2513,7 @@ def maybe_convert_objects(ndarray[object] objects,
         ndarray[int64_t] ints
         ndarray[uint64_t] uints
         ndarray[uint8_t] bools
+        ndarray[uint8_t] mask
         Seen seen = Seen()
         object val
         _TSObject tsobj
@@ -2574,7 +2613,7 @@ def maybe_convert_objects(ndarray[object] objects,
             seen.complex_ = True
             if not convert_numeric:
                 break
-        elif PyDateTime_Check(val) or util.is_datetime64_object(val):
+        elif PyDateTime_Check(val) or cnp.is_datetime64_object(val):
 
             # if we have an tz's attached then return the objects
             if convert_non_numeric:
@@ -2587,6 +2626,7 @@ def maybe_convert_objects(ndarray[object] objects,
                         tsobj = convert_to_tsobject(val, None, None, 0, 0)
                         tsobj.ensure_reso(NPY_FR_ns)
                     except OutOfBoundsDatetime:
+                        # e.g. test_out_of_s_bounds_datetime64
                         seen.object_ = True
                         break
             else:
@@ -2615,6 +2655,16 @@ def maybe_convert_objects(ndarray[object] objects,
             else:
                 seen.object_ = True
                 break
+        elif isinstance(val, str):
+            if convert_non_numeric:
+                seen.str_ = True
+                break
+            else:
+                seen.object_ = True
+                break
+        elif val is C_NA:
+            seen.object_ = True
+            continue
         else:
             seen.object_ = True
             break
@@ -2669,6 +2719,14 @@ def maybe_convert_objects(ndarray[object] objects,
             return pi._data
         seen.object_ = True
 
+    elif seen.str_:
+        if using_pyarrow_string_dtype() and is_string_array(objects, skipna=True):
+            from pandas.core.arrays.string_ import StringDtype
+
+            dtype = StringDtype(storage="pyarrow_numpy")
+            return dtype.construct_array_type()._from_sequence(objects, dtype=dtype)
+
+        seen.object_ = True
     elif seen.interval_:
         if is_interval_array(objects):
             from pandas import IntervalIndex
@@ -2794,11 +2852,14 @@ no_default = _NoDefault.no_default  # Sentinel indicating the default value.
 NoDefault = Literal[_NoDefault.no_default]
 
 
-@cython.boundscheck(False)
-@cython.wraparound(False)
-def map_infer_mask(ndarray arr, object f, const uint8_t[:] mask, bint convert=True,
-                   object na_value=no_default, cnp.dtype dtype=np.dtype(object)
-                   ) -> np.ndarray:
+def map_infer_mask(
+        ndarray[object] arr,
+        object f,
+        const uint8_t[:] mask,
+        bint convert=True,
+        object na_value=no_default,
+        cnp.dtype dtype=np.dtype(object)
+) -> np.ndarray:
     """
     Substitute for np.vectorize with pandas-friendly dtype inference.
 
@@ -2809,10 +2870,10 @@ def map_infer_mask(ndarray arr, object f, const uint8_t[:] mask, bint convert=Tr
     mask : ndarray
         uint8 dtype ndarray indicating values not to apply `f` to.
     convert : bool, default True
-        Whether to call `maybe_convert_objects` on the resulting ndarray
+        Whether to call `maybe_convert_objects` on the resulting ndarray.
     na_value : Any, optional
         The result value to use for masked values. By default, the
-        input value is used
+        input value is used.
     dtype : numpy.dtype
         The numpy dtype to use for the result ndarray.
 
@@ -2820,13 +2881,39 @@ def map_infer_mask(ndarray arr, object f, const uint8_t[:] mask, bint convert=Tr
     -------
     np.ndarray
     """
+    cdef Py_ssize_t n = len(arr)
+    result = np.empty(n, dtype=dtype)
+
+    _map_infer_mask(
+        result,
+        arr,
+        f,
+        mask,
+        na_value,
+    )
+    if convert:
+        return maybe_convert_objects(result)
+    else:
+        return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def _map_infer_mask(
+        ndarray[uint8_int64_object_t] out,
+        ndarray[object] arr,
+        object f,
+        const uint8_t[:] mask,
+        object na_value=no_default,
+) -> None:
+    """
+    Helper for map_infer_mask, split off to use fused types based on the result.
+    """
     cdef:
         Py_ssize_t i, n
-        ndarray result
         object val
 
     n = len(arr)
-    result = np.empty(n, dtype=dtype)
     for i in range(n):
         if mask[i]:
             if na_value is no_default:
@@ -2840,12 +2927,7 @@ def map_infer_mask(ndarray arr, object f, const uint8_t[:] mask, bint convert=Tr
                 # unbox 0-dim arrays, GH#690
                 val = val.item()
 
-        result[i] = val
-
-    if convert:
-        return maybe_convert_objects(result)
-    else:
-        return result
+        out[i] = val
 
 
 @cython.boundscheck(False)
@@ -3001,7 +3083,7 @@ def to_object_array_tuples(rows: object) -> np.ndarray:
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
-def fast_multiget(dict mapping, ndarray keys, default=np.nan) -> np.ndarray:
+def fast_multiget(dict mapping, object[:] keys, default=np.nan) -> np.ndarray:
     cdef:
         Py_ssize_t i, n = len(keys)
         object val

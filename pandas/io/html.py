@@ -23,6 +23,7 @@ from pandas.errors import (
     AbstractMethodError,
     EmptyDataError,
 )
+from pandas.util._decorators import doc
 from pandas.util._exceptions import find_stack_level
 from pandas.util._validators import check_dtype_backend
 
@@ -32,6 +33,7 @@ from pandas import isna
 from pandas.core.indexes.base import Index
 from pandas.core.indexes.multi import MultiIndex
 from pandas.core.series import Series
+from pandas.core.shared_docs import _shared_docs
 
 from pandas.io.common import (
     file_exists,
@@ -40,7 +42,6 @@ from pandas.io.common import (
     is_fsspec_url,
     is_url,
     stringify_path,
-    urlopen,
     validate_header_arg,
 )
 from pandas.io.formats.printing import pprint_thing
@@ -56,7 +57,9 @@ if TYPE_CHECKING:
         BaseBuffer,
         DtypeBackend,
         FilePath,
+        HTMLFlavors,
         ReadBuffer,
+        StorageOptions,
     )
 
     from pandas import DataFrame
@@ -115,7 +118,11 @@ def _get_skiprows(skiprows: int | Sequence[int] | slice | None) -> int | Sequenc
     raise TypeError(f"{type(skiprows).__name__} is not a valid type for skipping rows")
 
 
-def _read(obj: FilePath | BaseBuffer, encoding: str | None) -> str | bytes:
+def _read(
+    obj: FilePath | BaseBuffer,
+    encoding: str | None,
+    storage_options: StorageOptions | None,
+) -> str | bytes:
     """
     Try to read from a url, file or string.
 
@@ -133,7 +140,9 @@ def _read(obj: FilePath | BaseBuffer, encoding: str | None) -> str | bytes:
         or hasattr(obj, "read")
         or (isinstance(obj, str) and file_exists(obj))
     ):
-        with get_handle(obj, "r", encoding=encoding) as handles:
+        with get_handle(
+            obj, "r", encoding=encoding, storage_options=storage_options
+        ) as handles:
             text = handles.handle.read()
     elif isinstance(obj, (str, bytes)):
         text = obj
@@ -219,6 +228,7 @@ class _HtmlFrameParser:
         encoding: str,
         displayed_only: bool,
         extract_links: Literal[None, "header", "footer", "body", "all"],
+        storage_options: StorageOptions = None,
     ) -> None:
         self.io = io
         self.match = match
@@ -226,6 +236,7 @@ class _HtmlFrameParser:
         self.encoding = encoding
         self.displayed_only = displayed_only
         self.extract_links = extract_links
+        self.storage_options = storage_options
 
     def parse_tables(self):
         """
@@ -355,13 +366,13 @@ class _HtmlFrameParser:
         """
         raise AbstractMethodError(self)
 
-    def _parse_tables(self, doc, match, attrs):
+    def _parse_tables(self, document, match, attrs):
         """
         Return all tables from the parsed DOM.
 
         Parameters
         ----------
-        doc : the DOM from which to parse the table element.
+        document : the DOM from which to parse the table element.
 
         match : str or regular expression
             The text to search for in the DOM tree.
@@ -586,9 +597,9 @@ class _BeautifulSoupHtml5LibFrameParser(_HtmlFrameParser):
 
         self._strainer = SoupStrainer("table")
 
-    def _parse_tables(self, doc, match, attrs):
+    def _parse_tables(self, document, match, attrs):
         element_name = self._strainer.name
-        tables = doc.find_all(element_name, attrs=attrs)
+        tables = document.find_all(element_name, attrs=attrs)
         if not tables:
             raise ValueError("No tables found")
 
@@ -637,7 +648,7 @@ class _BeautifulSoupHtml5LibFrameParser(_HtmlFrameParser):
         return table.select("tfoot tr")
 
     def _setup_build_doc(self):
-        raw_text = _read(self.io, self.encoding)
+        raw_text = _read(self.io, self.encoding, self.storage_options)
         if not raw_text:
             raise ValueError(f"No text parsed from document: {self.io}")
         return raw_text
@@ -718,7 +729,7 @@ class _LxmlFrameParser(_HtmlFrameParser):
         # <thead> or <tfoot> (see _parse_thead_tr).
         return row.xpath("./td|./th")
 
-    def _parse_tables(self, doc, match, kwargs):
+    def _parse_tables(self, document, match, kwargs):
         pattern = match.pattern
 
         # 1. check all descendants for the given pattern and only search tables
@@ -730,7 +741,7 @@ class _LxmlFrameParser(_HtmlFrameParser):
         if kwargs:
             xpath_expr += _build_xpath_expr(kwargs)
 
-        tables = doc.xpath(xpath_expr, namespaces=_re_namespace)
+        tables = document.xpath(xpath_expr, namespaces=_re_namespace)
 
         tables = self._handle_hidden_tables(tables, "attrib")
         if self.displayed_only:
@@ -777,8 +788,10 @@ class _LxmlFrameParser(_HtmlFrameParser):
 
         try:
             if is_url(self.io):
-                with urlopen(self.io) as f:
-                    r = parse(f, parser=parser)
+                with get_handle(
+                    self.io, "r", storage_options=self.storage_options
+                ) as f:
+                    r = parse(f.handle, parser=parser)
             else:
                 # try to parse the input in the simplest way
                 r = parse(self.io, parser=parser)
@@ -877,13 +890,13 @@ _valid_parsers = {
 }
 
 
-def _parser_dispatch(flavor: str | None) -> type[_HtmlFrameParser]:
+def _parser_dispatch(flavor: HTMLFlavors | None) -> type[_HtmlFrameParser]:
     """
     Choose the parser based on the input flavor.
 
     Parameters
     ----------
-    flavor : str
+    flavor : {{"lxml", "html5lib", "bs4"}} or None
         The type of parser to use. This must be a valid backend.
 
     Returns
@@ -945,14 +958,32 @@ def _validate_flavor(flavor):
     return flavor
 
 
-def _parse(flavor, io, match, attrs, encoding, displayed_only, extract_links, **kwargs):
+def _parse(
+    flavor,
+    io,
+    match,
+    attrs,
+    encoding,
+    displayed_only,
+    extract_links,
+    storage_options,
+    **kwargs,
+):
     flavor = _validate_flavor(flavor)
     compiled_match = re.compile(match)  # you can pass a compiled regex here
 
     retained = None
     for flav in flavor:
         parser = _parser_dispatch(flav)
-        p = parser(io, compiled_match, attrs, encoding, displayed_only, extract_links)
+        p = parser(
+            io,
+            compiled_match,
+            attrs,
+            encoding,
+            displayed_only,
+            extract_links,
+            storage_options,
+        )
 
         try:
             tables = p.parse_tables()
@@ -998,11 +1029,12 @@ def _parse(flavor, io, match, attrs, encoding, displayed_only, extract_links, **
     return ret
 
 
+@doc(storage_options=_shared_docs["storage_options"])
 def read_html(
     io: FilePath | ReadBuffer[str],
     *,
     match: str | Pattern = ".+",
-    flavor: str | None = None,
+    flavor: HTMLFlavors | Sequence[HTMLFlavors] | None = None,
     header: int | Sequence[int] | None = None,
     index_col: int | Sequence[int] | None = None,
     skiprows: int | Sequence[int] | slice | None = None,
@@ -1017,6 +1049,7 @@ def read_html(
     displayed_only: bool = True,
     extract_links: Literal[None, "header", "footer", "body", "all"] = None,
     dtype_backend: DtypeBackend | lib.NoDefault = lib.no_default,
+    storage_options: StorageOptions = None,
 ) -> list[DataFrame]:
     r"""
     Read HTML tables into a ``list`` of ``DataFrame`` objects.
@@ -1042,11 +1075,11 @@ def read_html(
         This value is converted to a regular expression so that there is
         consistent behavior between Beautiful Soup and lxml.
 
-    flavor : str, optional
-        The parsing engine to use. 'bs4' and 'html5lib' are synonymous with
-        each other, they are both there for backwards compatibility. The
-        default of ``None`` tries to use ``lxml`` to parse and if that fails it
-        falls back on ``bs4`` + ``html5lib``.
+    flavor : {{"lxml", "html5lib", "bs4"}} or list-like, optional
+        The parsing engine (or list of parsing engines) to use. 'bs4' and
+        'html5lib' are synonymous with each other, they are both there for
+        backwards compatibility. The default of ``None`` tries to use ``lxml``
+        to parse and if that fails it falls back on ``bs4`` + ``html5lib``.
 
     header : int or list-like, optional
         The row (or list of rows for a :class:`~pandas.MultiIndex`) to use to
@@ -1067,13 +1100,13 @@ def read_html(
         passed to lxml or Beautiful Soup. However, these attributes must be
         valid HTML table attributes to work correctly. For example, ::
 
-            attrs = {'id': 'table'}
+            attrs = {{'id': 'table'}}
 
         is a valid attribute dictionary because the 'id' HTML tag attribute is
         a valid HTML attribute for *any* HTML tag as per `this document
         <https://html.spec.whatwg.org/multipage/dom.html#global-attributes>`__. ::
 
-            attrs = {'asdf': 'table'}
+            attrs = {{'asdf': 'table'}}
 
         is *not* a valid attribute dictionary because 'asdf' is not a valid
         HTML attribute even if it is a valid XML attribute.  Valid HTML 4.01
@@ -1115,13 +1148,13 @@ def read_html(
     displayed_only : bool, default True
         Whether elements with "display: none" should be parsed.
 
-    extract_links : {None, "all", "header", "body", "footer"}
+    extract_links : {{None, "all", "header", "body", "footer"}}
         Table elements in the specified section(s) with <a> tags will have their
         href extracted.
 
         .. versionadded:: 1.5.0
 
-    dtype_backend : {'numpy_nullable', 'pyarrow'}, default 'numpy_nullable'
+    dtype_backend : {{'numpy_nullable', 'pyarrow'}}, default 'numpy_nullable'
         Back-end data type applied to the resultant :class:`DataFrame`
         (still experimental). Behaviour is as follows:
 
@@ -1131,6 +1164,10 @@ def read_html(
           DataFrame.
 
         .. versionadded:: 2.0
+
+    {storage_options}
+
+        .. versionadded:: 2.1.0
 
     Returns
     -------
@@ -1224,4 +1261,5 @@ def read_html(
         displayed_only=displayed_only,
         extract_links=extract_links,
         dtype_backend=dtype_backend,
+        storage_options=storage_options,
     )

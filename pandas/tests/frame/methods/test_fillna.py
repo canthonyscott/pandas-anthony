@@ -20,14 +20,18 @@ from pandas.tests.frame.common import _check_mixed_float
 
 
 class TestFillNA:
-    def test_fillna_dict_inplace_nonunique_columns(self, using_copy_on_write):
+    def test_fillna_dict_inplace_nonunique_columns(
+        self, using_copy_on_write, warn_copy_on_write
+    ):
         df = DataFrame(
             {"A": [np.nan] * 3, "B": [NaT, Timestamp(1), NaT], "C": [np.nan, "foo", 2]}
         )
         df.columns = ["A", "A", "A"]
         orig = df[:]
 
-        df.fillna({"A": 2}, inplace=True)
+        # TODO(CoW-warn) better warning message
+        with tm.assert_cow_warning(warn_copy_on_write):
+            df.fillna({"A": 2}, inplace=True)
         # The first and third columns can be set inplace, while the second cannot.
 
         expected = DataFrame(
@@ -135,7 +139,7 @@ class TestFillNA:
 
     def test_fillna_limit_and_value(self):
         # limit and value
-        df = DataFrame(np.random.randn(10, 3))
+        df = DataFrame(np.random.default_rng(2).standard_normal((10, 3)))
         df.iloc[2:7, 0] = np.nan
         df.iloc[3:5, 2] = np.nan
 
@@ -360,7 +364,9 @@ class TestFillNA:
         expected = Series([np.dtype("object")] * 5, index=[1, 2, 3, 4, 5])
         tm.assert_series_equal(result, expected)
 
-        result = df.fillna(1)
+        msg = "Downcasting object dtype arrays"
+        with tm.assert_produces_warning(FutureWarning, match=msg):
+            result = df.fillna(1)
         expected = DataFrame(1, index=["A", "B", "C"], columns=[1, 2, 3, 4, 5])
         tm.assert_frame_equal(result, expected)
 
@@ -442,7 +448,7 @@ class TestFillNA:
 
     def test_frame_pad_backfill_limit(self):
         index = np.arange(10)
-        df = DataFrame(np.random.randn(10, 4), index=index)
+        df = DataFrame(np.random.default_rng(2).standard_normal((10, 4)), index=index)
 
         result = df[:2].reindex(index, method="pad", limit=5)
 
@@ -461,7 +467,7 @@ class TestFillNA:
 
     def test_frame_fillna_limit(self):
         index = np.arange(10)
-        df = DataFrame(np.random.randn(10, 4), index=index)
+        df = DataFrame(np.random.default_rng(2).standard_normal((10, 4)), index=index)
 
         result = df[:2].reindex(index)
         msg = "DataFrame.fillna with 'method' is deprecated"
@@ -485,14 +491,14 @@ class TestFillNA:
     def test_fillna_skip_certain_blocks(self):
         # don't try to fill boolean, int blocks
 
-        df = DataFrame(np.random.randn(10, 4).astype(int))
+        df = DataFrame(np.random.default_rng(2).standard_normal((10, 4)).astype(int))
 
         # it works!
         df.fillna(np.nan)
 
     @pytest.mark.parametrize("type", [int, float])
     def test_fillna_positive_limit(self, type):
-        df = DataFrame(np.random.randn(10, 4)).astype(type)
+        df = DataFrame(np.random.default_rng(2).standard_normal((10, 4))).astype(type)
 
         msg = "Limit must be greater than 0"
         with pytest.raises(ValueError, match=msg):
@@ -500,14 +506,14 @@ class TestFillNA:
 
     @pytest.mark.parametrize("type", [int, float])
     def test_fillna_integer_limit(self, type):
-        df = DataFrame(np.random.randn(10, 4)).astype(type)
+        df = DataFrame(np.random.default_rng(2).standard_normal((10, 4))).astype(type)
 
         msg = "Limit must be an integer"
         with pytest.raises(ValueError, match=msg):
             df.fillna(0, limit=0.5)
 
     def test_fillna_inplace(self):
-        df = DataFrame(np.random.randn(10, 4))
+        df = DataFrame(np.random.default_rng(2).standard_normal((10, 4)))
         df.loc[:4, 1] = np.nan
         df.loc[-4:, 3] = np.nan
 
@@ -595,7 +601,7 @@ class TestFillNA:
         tm.assert_frame_equal(result, expected)
 
     def test_fillna_columns(self):
-        arr = np.random.randn(10, 10)
+        arr = np.random.default_rng(2).standard_normal((10, 10))
         arr[:, ::2] = np.nan
         df = DataFrame(arr)
 
@@ -635,7 +641,7 @@ class TestFillNA:
 
     def test_fillna_col_reordering(self):
         cols = ["COL." + str(i) for i in range(5, 0, -1)]
-        data = np.random.rand(20, 5)
+        data = np.random.default_rng(2).random((20, 5))
         df = DataFrame(index=range(20), columns=cols, data=data)
         msg = "DataFrame.fillna with 'method' is deprecated"
         with tm.assert_produces_warning(FutureWarning, match=msg):
@@ -731,12 +737,16 @@ class TestFillNA:
 
     @td.skip_array_manager_invalid_test
     @pytest.mark.parametrize("val", [-1, {"x": -1, "y": -1}])
-    def test_inplace_dict_update_view(self, val, using_copy_on_write):
+    def test_inplace_dict_update_view(
+        self, val, using_copy_on_write, warn_copy_on_write
+    ):
         # GH#47188
         df = DataFrame({"x": [np.nan, 2], "y": [np.nan, 2]})
         df_orig = df.copy()
         result_view = df[:]
-        df.fillna(val, inplace=True)
+        # TODO(CoW-warn) better warning message + should warn in all cases
+        with tm.assert_cow_warning(warn_copy_on_write and not isinstance(val, int)):
+            df.fillna(val, inplace=True)
         expected = DataFrame({"x": [-1, 2.0], "y": [-1.0, 2]})
         tm.assert_frame_equal(df, expected)
         if using_copy_on_write:
@@ -817,7 +827,8 @@ def test_fillna_nones_inplace():
         [[None, None], [None, None]],
         columns=["A", "B"],
     )
-    with tm.assert_produces_warning(False):
+    msg = "Downcasting object dtype arrays"
+    with tm.assert_produces_warning(FutureWarning, match=msg):
         df.fillna(value={"A": 1, "B": 2}, inplace=True)
 
     expected = DataFrame([[1, 2], [1, 2]], columns=["A", "B"])

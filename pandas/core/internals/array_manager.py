@@ -35,11 +35,7 @@ from pandas.core.dtypes.common import (
     is_object_dtype,
     is_timedelta64_ns_dtype,
 )
-from pandas.core.dtypes.dtypes import (
-    ExtensionDtype,
-    PandasDtype,
-    SparseDtype,
-)
+from pandas.core.dtypes.dtypes import ExtensionDtype
 from pandas.core.dtypes.generic import (
     ABCDataFrame,
     ABCSeries,
@@ -56,7 +52,7 @@ from pandas.core.array_algos.take import take_1d
 from pandas.core.arrays import (
     DatetimeArray,
     ExtensionArray,
-    PandasArray,
+    NumpyExtensionArray,
     TimedeltaArray,
 )
 from pandas.core.construction import (
@@ -72,9 +68,11 @@ from pandas.core.indexes.api import (
     Index,
     ensure_index,
 )
+from pandas.core.indexes.base import get_values_for_csv
 from pandas.core.internals.base import (
     DataManager,
     SingleDataManager,
+    ensure_np_dtype,
     interleaved_dtype,
 )
 from pandas.core.internals.blocks import (
@@ -84,7 +82,6 @@ from pandas.core.internals.blocks import (
     extract_pandas_array,
     maybe_coerce_values,
     new_block,
-    to_native_types,
 )
 from pandas.core.internals.managers import make_na_array
 
@@ -331,7 +328,8 @@ class BaseArrayManager(DataManager):
 
         def _convert(arr):
             if is_object_dtype(arr.dtype):
-                # extract PandasArray for tests that patch PandasArray._typ
+                # extract NumpyExtensionArray for tests that patch
+                #  NumpyExtensionArray._typ
                 arr = np.asarray(arr)
                 result = lib.maybe_convert_objects(
                     arr,
@@ -345,8 +343,17 @@ class BaseArrayManager(DataManager):
 
         return self.apply(_convert)
 
-    def to_native_types(self, **kwargs) -> Self:
-        return self.apply(to_native_types, **kwargs)
+    def get_values_for_csv(
+        self, *, float_format, date_format, decimal, na_rep: str = "nan", quoting=None
+    ) -> Self:
+        return self.apply(
+            get_values_for_csv,
+            na_rep=na_rep,
+            quoting=quoting,
+            float_format=float_format,
+            date_format=date_format,
+            decimal=decimal,
+        )
 
     @property
     def any_extension_types(self) -> bool:
@@ -1020,14 +1027,7 @@ class ArrayManager(BaseArrayManager):
         if not dtype:
             dtype = interleaved_dtype([arr.dtype for arr in self.arrays])
 
-        if isinstance(dtype, SparseDtype):
-            dtype = dtype.subtype
-        elif isinstance(dtype, PandasDtype):
-            dtype = dtype.numpy_dtype
-        elif isinstance(dtype, ExtensionDtype):
-            dtype = np.dtype("object")
-        elif dtype == np.dtype(str):
-            dtype = np.dtype("object")
+        dtype = ensure_np_dtype(dtype)
 
         result = np.empty(self.shape_proper, dtype=dtype)
 
@@ -1112,7 +1112,7 @@ class SingleArrayManager(BaseArrayManager, SingleDataManager):
     def _normalize_axis(axis):
         return axis
 
-    def make_empty(self, axes=None) -> SingleArrayManager:
+    def make_empty(self, axes=None) -> Self:
         """Return an empty ArrayManager with index/array of length 0"""
         if axes is None:
             axes = [Index([], dtype=object)]
@@ -1148,7 +1148,7 @@ class SingleArrayManager(BaseArrayManager, SingleDataManager):
         """The array that Series.array returns"""
         arr = self.array
         if isinstance(arr, np.ndarray):
-            arr = PandasArray(arr)
+            arr = NumpyExtensionArray(arr)
         return arr
 
     @property

@@ -202,10 +202,12 @@ class DataFrameDescriber(NDFrameDescriberAbstract):
 def reorder_columns(ldesc: Sequence[Series]) -> list[Hashable]:
     """Set a convenient order for rows for display."""
     names: list[Hashable] = []
+    seen_names: set[Hashable] = set()
     ldesc_indexes = sorted((x.index for x in ldesc), key=len)
     for idxnames in ldesc_indexes:
         for name in idxnames:
-            if name not in names:
+            if name not in seen_names:
+                seen_names.add(name)
                 names.append(name)
     return names
 
@@ -299,7 +301,7 @@ def describe_timestamp_as_categorical_1d(
     names = ["count", "unique"]
     objcounts = data.value_counts()
     count_unique = len(objcounts[objcounts != 0])
-    result = [data.count(), count_unique]
+    result: list[float | Timestamp] = [data.count(), count_unique]
     dtype = None
     if count_unique > 0:
         top, freq = objcounts.index[0], objcounts.iloc[0]

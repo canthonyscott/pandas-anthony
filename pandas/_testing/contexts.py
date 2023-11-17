@@ -128,6 +128,8 @@ def ensure_clean(
     encoding = kwargs.pop("encoding", None)
     if return_filelike:
         kwargs.setdefault("mode", "w+b")
+        if encoding is None and "b" not in kwargs["mode"]:
+            encoding = "utf-8"
         handle_or_str = open(path, encoding=encoding, **kwargs)
 
     try:
@@ -212,3 +214,29 @@ def raises_chained_assignment_error(extra_warnings=(), extra_match=()):
             (ChainedAssignmentError, *extra_warnings),
             match="|".join((match, *extra_match)),
         )
+
+
+def assert_cow_warning(warn=True, match=None, **kwargs):
+    """
+    Assert that a warning is raised in the CoW warning mode.
+
+    Parameters
+    ----------
+    warn : bool, default True
+        By default, check that a warning is raised. Can be turned off by passing False.
+    match : str
+        The warning message to match against, if different from the default.
+    kwargs
+        Passed through to assert_produces_warning
+    """
+    from pandas._testing import assert_produces_warning
+
+    if not warn:
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    if not match:
+        match = "Setting a value on a view"
+
+    return assert_produces_warning(FutureWarning, match=match, **kwargs)

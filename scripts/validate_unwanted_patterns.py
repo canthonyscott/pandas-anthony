@@ -33,6 +33,7 @@ PRIVATE_IMPORTS_TO_IGNORE: set[str] = {
     "_agg_template_series",
     "_agg_template_frame",
     "_pipe_template",
+    "_apply_groupings_depr",
     "__main__",
     "_transform_template",
     "_use_inf_as_na",
@@ -49,6 +50,11 @@ PRIVATE_IMPORTS_TO_IGNORE: set[str] = {
     "_global_config",
     "_chained_assignment_msg",
     "_chained_assignment_method_msg",
+    "_version_meson",
+    # The numba extensions need this to mock the iloc object
+    "_iLocIndexer",
+    # TODO(3.0): GH#55043 - remove upon removal of ArrayManager
+    "_get_option",
 }
 
 
@@ -392,9 +398,11 @@ def nodefault_used_not_only_for_typing(file_obj: IO[str]) -> Iterable[tuple[int,
             if isinstance(value, ast.AST):
                 nodes.append((next_in_annotation, value))
             elif isinstance(value, list):
-                for value in reversed(value):
-                    if isinstance(value, ast.AST):
-                        nodes.append((next_in_annotation, value))
+                nodes.extend(
+                    (next_in_annotation, value)
+                    for value in reversed(value)
+                    if isinstance(value, ast.AST)
+                )
 
 
 def main(
