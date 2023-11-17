@@ -50,6 +50,7 @@ from pandas.core.ops.common import unpack_zerodim_and_defer
 
 if TYPE_CHECKING:
     from pandas._typing import (
+        Axis,
         Dtype,
         NaPosition,
         Self,
@@ -138,12 +139,12 @@ class RangeIndex(Index):
         dtype: Dtype | None = None,
         copy: bool = False,
         name: Hashable | None = None,
-    ) -> RangeIndex:
+    ) -> Self:
         cls._validate_dtype(dtype)
         name = maybe_extract_name(name, start, cls)
 
         # RangeIndex
-        if isinstance(start, RangeIndex):
+        if isinstance(start, cls):
             return start.copy(name=name)
         elif isinstance(start, range):
             return cls._simple_new(start, name=name)
@@ -239,7 +240,7 @@ class RangeIndex(Index):
         """
         return np.arange(self.start, self.stop, self.step, dtype=np.int64)
 
-    def _get_data_as_items(self):
+    def _get_data_as_items(self) -> list[tuple[str, int]]:
         """return a list of tuples of start, stop, step"""
         rng = self._range
         return [("start", rng.start), ("stop", rng.stop), ("step", rng.step)]
@@ -256,16 +257,12 @@ class RangeIndex(Index):
         """
         Return a list of tuples of the (attr, formatted_value)
         """
-        attrs = self._get_data_as_items()
+        attrs = cast("list[tuple[str, str | int]]", self._get_data_as_items())
         if self._name is not None:
             attrs.append(("name", ibase.default_pprint(self._name)))
         return attrs
 
-    def _format_data(self, name=None):
-        # we are formatting thru the attributes
-        return None
-
-    def _format_with_header(self, header: list[str], na_rep: str) -> list[str]:
+    def _format_with_header(self, *, header: list[str], na_rep: str) -> list[str]:
         # Equivalent to Index implementation, but faster
         if not len(self._range):
             return header
@@ -406,7 +403,7 @@ class RangeIndex(Index):
     # Indexing Methods
 
     @doc(Index.get_loc)
-    def get_loc(self, key):
+    def get_loc(self, key) -> int:
         if is_integer(key) or (is_float(key) and key.is_integer()):
             new_key = int(key)
             try:
@@ -1105,3 +1102,46 @@ class RangeIndex(Index):
         except (ValueError, TypeError, ZeroDivisionError):
             # test_arithmetic_explicit_conversions
             return super()._arith_method(other, op)
+
+    # error: Return type "Index" of "take" incompatible with return type
+    # "RangeIndex" in supertype "Index"
+    def take(  # type: ignore[override]
+        self,
+        indices,
+        axis: Axis = 0,
+        allow_fill: bool = True,
+        fill_value=None,
+        **kwargs,
+    ) -> Index:
+        if kwargs:
+            nv.validate_take((), kwargs)
+        if is_scalar(indices):
+            raise TypeError("Expected indices to be array-like")
+        indices = ensure_platform_int(indices)
+
+        # raise an exception if allow_fill is True and fill_value is not None
+        self._maybe_disallow_fill(allow_fill, fill_value, indices)
+
+        if len(indices) == 0:
+            taken = np.array([], dtype=self.dtype)
+        else:
+            ind_max = indices.max()
+            if ind_max >= len(self):
+                raise IndexError(
+                    f"index {ind_max} is out of bounds for axis 0 with size {len(self)}"
+                )
+            ind_min = indices.min()
+            if ind_min < -len(self):
+                raise IndexError(
+                    f"index {ind_min} is out of bounds for axis 0 with size {len(self)}"
+                )
+            taken = indices.astype(self.dtype, casting="safe")
+            if ind_min < 0:
+                taken %= len(self)
+            if self.step != 1:
+                taken *= self.step
+            if self.start != 0:
+                taken += self.start
+
+        # _constructor so RangeIndex-> Index with an int64 dtype
+        return self._constructor._simple_new(taken, name=self.name)

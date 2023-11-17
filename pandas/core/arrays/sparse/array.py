@@ -28,6 +28,7 @@ from pandas._libs.sparse import (
 from pandas._libs.tslibs import NaT
 from pandas.compat.numpy import function as nv
 from pandas.errors import PerformanceWarning
+from pandas.util._decorators import doc
 from pandas.util._exceptions import find_stack_level
 from pandas.util._validators import (
     validate_bool_kwarg,
@@ -78,7 +79,6 @@ from pandas.core.indexers import (
     check_array_indexer,
     unpack_tuple_and_ellipses,
 )
-from pandas.core.missing import pad_or_backfill_inplace
 from pandas.core.nanops import check_below_min_count
 
 from pandas.io.formats import printing
@@ -576,7 +576,7 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
         out[self.sp_index.indices] = self.sp_values
         return out
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key, value) -> None:
         # I suppose we could allow setting of non-fill_value elements.
         # TODO(SparseArray.__setitem__): remove special cases in
         # ExtensionBlock.where
@@ -703,7 +703,9 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
         """
         return self.sp_index.npoints
 
-    def isna(self):
+    # error: Return type "SparseArray" of "isna" incompatible with return type
+    # "ndarray[Any, Any] | ExtensionArraySupportsAnyAll" in supertype "ExtensionArray"
+    def isna(self) -> Self:  # type: ignore[override]
         # If null fill value, we want SparseDtype[bool, true]
         # to preserve the same memory usage.
         dtype = SparseDtype(bool, self._null_fill_value)
@@ -713,11 +715,19 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
         mask[self.sp_index.indices] = isna(self.sp_values)
         return type(self)(mask, fill_value=False, dtype=dtype)
 
+    def _pad_or_backfill(  # pylint: disable=useless-parent-delegation
+        self, *, method: FillnaOptions, limit: int | None = None, copy: bool = True
+    ) -> Self:
+        # TODO(3.0): We can remove this method once deprecation for fillna method
+        #  keyword is enforced.
+        return super()._pad_or_backfill(method=method, limit=limit, copy=copy)
+
     def fillna(
         self,
         value=None,
         method: FillnaOptions | None = None,
         limit: int | None = None,
+        copy: bool = True,
     ) -> Self:
         """
         Fill missing values with `value`.
@@ -734,6 +744,9 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                an in-memory ndarray
 
         limit : int, optional
+
+        copy: bool, default True
+            Ignored for SparseArray.
 
         Returns
         -------
@@ -757,21 +770,7 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             raise ValueError("Must specify one of 'method' or 'value'.")
 
         if method is not None:
-            msg = "fillna with 'method' requires high memory usage."
-            warnings.warn(
-                msg,
-                PerformanceWarning,
-                stacklevel=find_stack_level(),
-            )
-            new_values = np.asarray(self)
-            # pad_or_backfill_inplace modifies new_values inplace
-            # error: Argument "method" to "pad_or_backfill_inplace" has incompatible
-            # type "Literal['backfill', 'bfill', 'ffill', 'pad']"; expected
-            # "Literal['pad', 'backfill']"
-            pad_or_backfill_inplace(
-                new_values, method=method, limit=limit  # type: ignore[arg-type]
-            )
-            return type(self)(new_values, fill_value=self.fill_value)
+            return super().fillna(method=method, limit=limit)
 
         else:
             new_values = np.where(isna(self.sp_values), value, self.sp_values)
@@ -832,6 +831,14 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
         diff = np.r_[np.diff(indices), 2]
         return indices[(diff > 1).argmax()] + 1
 
+    @doc(ExtensionArray.duplicated)
+    def duplicated(
+        self, keep: Literal["first", "last", False] = "first"
+    ) -> npt.NDArray[np.bool_]:
+        values = np.asarray(self)
+        mask = np.asarray(self.isna())
+        return algos.duplicated(values, keep=keep, mask=mask)
+
     def unique(self) -> Self:
         uniques = algos.unique(self.sp_values)
         if len(self.sp_values) != len(self):
@@ -883,7 +890,7 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             Series,
         )
 
-        keys, counts = algos.value_counts_arraylike(self.sp_values, dropna=dropna)
+        keys, counts, _ = algos.value_counts_arraylike(self.sp_values, dropna=dropna)
         fcounts = self.sp_index.ngaps
         if fcounts > 0 and (not self._null_fill_value or not dropna):
             mask = isna(keys) if self._null_fill_value else keys == self.fill_value
@@ -1425,7 +1432,7 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
 
         return values.all()
 
-    def any(self, axis: AxisInt = 0, *args, **kwargs):
+    def any(self, axis: AxisInt = 0, *args, **kwargs) -> bool:
         """
         Tests whether at least one of elements evaluate True
 

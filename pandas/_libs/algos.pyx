@@ -59,7 +59,7 @@ from pandas._libs.util cimport get_nat
 
 cdef:
     float64_t FP_ERR = 1e-13
-    float64_t NaN = <float64_t>np.NaN
+    float64_t NaN = <float64_t>np.nan
     int64_t NPY_NAT = get_nat()
 
 
@@ -814,7 +814,7 @@ def is_monotonic(ndarray[numeric_object_t, ndim=1] arr, bint timelike):
         return True, True, True
 
     if timelike and <int64_t>arr[0] == NPY_NAT:
-        return False, False, True
+        return False, False, False
 
     if numeric_object_t is not object:
         with nogil:

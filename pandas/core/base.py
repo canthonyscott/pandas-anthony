@@ -14,6 +14,7 @@ from typing import (
     final,
     overload,
 )
+import warnings
 
 import numpy as np
 
@@ -36,6 +37,7 @@ from pandas.util._decorators import (
     cache_readonly,
     doc,
 )
+from pandas.util._exceptions import find_stack_level
 
 from pandas.core.dtypes.cast import can_hold_element
 from pandas.core.dtypes.common import (
@@ -483,8 +485,8 @@ class IndexOpsMixin(OpsMixin):
             types, this is the actual array. For NumPy native types, this
             is a thin (no copy) wrapper around :class:`numpy.ndarray`.
 
-            ``.array`` differs ``.values`` which may require converting the
-            data to a different form.
+            ``.array`` differs from ``.values``, which may require converting
+            the data to a different form.
 
         See Also
         --------
@@ -518,11 +520,11 @@ class IndexOpsMixin(OpsMixin):
 
         Examples
         --------
-        For regular NumPy types like int, and float, a PandasArray
+        For regular NumPy types like int, and float, a NumpyExtensionArray
         is returned.
 
         >>> pd.Series([1, 2, 3]).array
-        <PandasArray>
+        <NumpyExtensionArray>
         [1, 2, 3]
         Length: 3, dtype: int64
 
@@ -634,7 +636,7 @@ class IndexOpsMixin(OpsMixin):
         if isinstance(self.dtype, ExtensionDtype):
             return self.array.to_numpy(dtype, copy=copy, na_value=na_value, **kwargs)
         elif kwargs:
-            bad_keys = list(kwargs.keys())[0]
+            bad_keys = next(iter(kwargs.keys()))
             raise TypeError(
                 f"to_numpy() got an unexpected keyword argument '{bad_keys}'"
             )
@@ -735,15 +737,29 @@ class IndexOpsMixin(OpsMixin):
 
         if isinstance(delegate, ExtensionArray):
             if not skipna and delegate.isna().any():
+                warnings.warn(
+                    f"The behavior of {type(self).__name__}.argmax/argmin "
+                    "with skipna=False and NAs, or with all-NAs is deprecated. "
+                    "In a future version this will raise ValueError.",
+                    FutureWarning,
+                    stacklevel=find_stack_level(),
+                )
                 return -1
             else:
                 return delegate.argmax()
         else:
+            result = nanops.nanargmax(delegate, skipna=skipna)
+            if result == -1:
+                warnings.warn(
+                    f"The behavior of {type(self).__name__}.argmax/argmin "
+                    "with skipna=False and NAs, or with all-NAs is deprecated. "
+                    "In a future version this will raise ValueError.",
+                    FutureWarning,
+                    stacklevel=find_stack_level(),
+                )
             # error: Incompatible return value type (got "Union[int, ndarray]", expected
             # "int")
-            return nanops.nanargmax(  # type: ignore[return-value]
-                delegate, skipna=skipna
-            )
+            return result  # type: ignore[return-value]
 
     @doc(argmax, op="min", oppose="max", value="smallest")
     def argmin(
@@ -755,15 +771,29 @@ class IndexOpsMixin(OpsMixin):
 
         if isinstance(delegate, ExtensionArray):
             if not skipna and delegate.isna().any():
+                warnings.warn(
+                    f"The behavior of {type(self).__name__}.argmax/argmin "
+                    "with skipna=False and NAs, or with all-NAs is deprecated. "
+                    "In a future version this will raise ValueError.",
+                    FutureWarning,
+                    stacklevel=find_stack_level(),
+                )
                 return -1
             else:
                 return delegate.argmin()
         else:
+            result = nanops.nanargmin(delegate, skipna=skipna)
+            if result == -1:
+                warnings.warn(
+                    f"The behavior of {type(self).__name__}.argmax/argmin "
+                    "with skipna=False and NAs, or with all-NAs is deprecated. "
+                    "In a future version this will raise ValueError.",
+                    FutureWarning,
+                    stacklevel=find_stack_level(),
+                )
             # error: Incompatible return value type (got "Union[int, ndarray]", expected
             # "int")
-            return nanops.nanargmin(  # type: ignore[return-value]
-                delegate, skipna=skipna
-            )
+            return result  # type: ignore[return-value]
 
     def tolist(self):
         """
@@ -1335,7 +1365,10 @@ class IndexOpsMixin(OpsMixin):
 
     @final
     def _duplicated(self, keep: DropKeep = "first") -> npt.NDArray[np.bool_]:
-        return algorithms.duplicated(self._values, keep=keep)
+        arr = self._values
+        if isinstance(arr, ExtensionArray):
+            return arr.duplicated(keep=keep)
+        return algorithms.duplicated(arr, keep=keep)
 
     def _arith_method(self, other, op):
         res_name = ops.get_op_result_name(self, other)

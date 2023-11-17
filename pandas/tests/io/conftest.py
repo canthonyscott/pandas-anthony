@@ -96,7 +96,7 @@ def s3_base(worker_id, monkeysession):
             yield "http://localhost:5000"
     else:
         requests = pytest.importorskip("requests")
-        pytest.importorskip("moto", minversion="1.3.14")
+        pytest.importorskip("moto")
         pytest.importorskip("flask")  # server mode needs flask too
 
         # Launching moto in server mode, i.e., as a separate process
@@ -234,3 +234,19 @@ def compression_format(request):
 @pytest.fixture(params=_compression_formats_params)
 def compression_ext(request):
     return request.param[0]
+
+
+@pytest.fixture(
+    params=[
+        "python",
+        pytest.param("pyarrow", marks=td.skip_if_no("pyarrow")),
+    ]
+)
+def string_storage(request):
+    """
+    Parametrized fixture for pd.options.mode.string_storage.
+
+    * 'python'
+    * 'pyarrow'
+    """
+    return request.param
